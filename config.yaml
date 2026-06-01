@@ -1,0 +1,37 @@
+business_name: SpiceNutrition
+business_type: nutrition_supplement
+tagline: "Fuel Your Performance"
+has_website: true
+website_url: https://spicenutrition.in
+whatsapp_number: "+91XXXXXXXXXX"
+return_policy_days: 30
+delivery_days: "3-5"
+currency: INR
+currency_symbol: "₹"
+llm_model: claude-3-haiku-20240307
+low_stock_threshold: 5
+brand_colors:
+  primary: "#1565C0"     # blue
+  secondary: "#FFFFFF"   # white
+  accent: "#42A5F5"      # light blue
+escalation_keywords:
+  - refund
+  - complaint
+  - manager
+  - angry
+  - fraud
+  - legal
+  - lawsuit
+  - side effect
+  - allergic
+  - reaction
+  - sick
+  - hospital
+payment_methods:
+  - UPI
+  - Credit Card
+  - Debit Card
+  - Net Banking
+  - Cash on Delivery
+working_hours: "Mon-Sat, 9 AM – 9 PM IST"
+support_email: support@spicenutrition.in
