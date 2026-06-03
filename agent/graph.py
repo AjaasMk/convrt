@@ -36,34 +36,66 @@ def get_graph():
     return _compiled_graph
 
 
-def chat(message: str, session_id: str, customer_phone: str = "unknown") -> str:
+def chat(message: str, session_id: str, customer_phone: str = "unknown",
+         image_bytes: bytes = None, image_mime: str = "image/jpeg") -> str:
     """
-    Send one user message and return the agent's text reply.
-    State is persisted per session_id via MemorySaver.
+    Send one user message (optionally with an uploaded product image) and
+    return the agent's text reply. State is persisted per session_id.
+
+    If image_bytes is given, a vision model first describes the product in the
+    image (e.g. a reel screenshot), and that description is handed to the agent
+    so it can match it to the SpiceNutrition catalogue.
     """
     from langchain_core.messages import HumanMessage
     from .rate_limiter import check_rate_limit
     from . import handoff
+
+    message = message or ""
 
     # Anti-spam / cost guard — runs BEFORE any LLM call.
     allowed, canned = check_rate_limit(customer_phone)
     if not allowed:
         return canned
 
+    # What the customer sees in the transcript vs. what the agent receives.
+    display_message = message
+    if image_bytes:
+        display_message = "📷 [sent a product photo]" + (f" — {message}" if message else "")
+
     # Track the conversation + log the inbound customer message.
     handoff.ensure_conversation(session_id, customer_phone)
-    handoff.log_message(session_id, "customer", message)
+    handoff.log_message(session_id, "customer", display_message)
 
-    # Human handoff: if a staff member has taken over (or is typing),
-    # the AI stays silent. AI auto-resumes after the inactivity timeout.
+    # Human handoff: if a staff member has taken over, the AI stays silent.
     if handoff.get_mode(session_id) == "human":
-        return ""  # no AI reply; staff handles this conversation
+        return ""  # staff handles this conversation
+
+    # Vision step: turn the image into a description for the text agent.
+    agent_message = message
+    if image_bytes:
+        from .vision import describe_product_image
+        desc = describe_product_image(image_bytes, image_mime, caption=message)
+        if desc.startswith("__VISION_ERROR__"):
+            agent_message = (
+                (message or "") +
+                "\n[The customer sent a product photo but it couldn't be read. "
+                "Politely ask them to describe the product or send a clearer photo.]"
+            )
+        else:
+            agent_message = (
+                f"The customer sent a product photo (likely a screenshot from a reel). "
+                f"A vision system describes it as: \"{desc}\". "
+                f"Use your tools to find the closest matching SpiceNutrition product(s) and give "
+                f"details (price, flavours, availability). If we don't carry that exact brand, "
+                f"recommend our closest equivalent and say so. "
+                f"Customer's note: {message or '(none)'}"
+            )
 
     graph = get_graph()
     config = {"configurable": {"thread_id": session_id}}
 
     state_update = {
-        "messages": [HumanMessage(content=message)],
+        "messages": [HumanMessage(content=agent_message)],
         "session_id": session_id,
         "customer_phone": customer_phone,
         "escalated": False,
@@ -77,8 +109,23 @@ def chat(message: str, session_id: str, customer_phone: str = "unknown") -> str:
 
     last = result["messages"][-1]
     reply = _content_to_text(getattr(last, "content", last))
+
+    # The model often summarises away the payment QR/link. If request_payment ran
+    # this turn, make sure its full output (QR image + UPI link) reaches the customer.
+    pay_out = _tool_output(result["messages"], "request_payment")
+    if pay_out and "/api/payment/qr" not in reply:
+        reply = (reply.rstrip() + "\n\n" + pay_out).strip() if reply.strip() else pay_out
+
     handoff.log_message(session_id, "ai", reply)
     return reply
+
+
+def _tool_output(messages, tool_name: str) -> str:
+    """Return the most recent ToolMessage content for the given tool name."""
+    for m in reversed(messages):
+        if getattr(m, "name", None) == tool_name and getattr(m, "type", "") == "tool":
+            return _content_to_text(getattr(m, "content", ""))
+    return ""
 
 
 def _escalated_this_turn(messages) -> bool:

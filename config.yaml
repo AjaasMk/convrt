@@ -33,5 +33,7 @@ payment_methods:
   - Debit Card
   - Net Banking
   - Cash on Delivery
+upi_id: "spicenutrition@upi"        # demo VPA (replace with a real one to collect payments)
+payee_name: "SpiceNutrition"
 working_hours: "Mon-Sat, 9 AM – 9 PM IST"
 support_email: support@spicenutrition.in

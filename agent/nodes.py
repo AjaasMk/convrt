@@ -38,12 +38,18 @@ def _build_llm(cfg: dict):
 
     if provider in ("gemini", "google"):
         from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(
+        kwargs = dict(
             model=os.getenv("GEMINI_MODEL", "gemini-flash-latest"),
             google_api_key=gemini_key,
             temperature=0.3,
             max_tokens=1024,
         )
+        # Disable "thinking" on Gemini 2.5 Flash for much faster replies.
+        # (thinking_budget=0). Guarded in case the installed version lacks it.
+        try:
+            return ChatGoogleGenerativeAI(thinking_budget=0, **kwargs)
+        except Exception:
+            return ChatGoogleGenerativeAI(**kwargs)
 
     if provider == "groq":
         from langchain_groq import ChatGroq
@@ -76,13 +82,31 @@ def _load_config() -> dict:
 
 def _build_system_prompt(cfg: dict) -> str:
     symbols = cfg.get("currency_symbol", "₹")
-    return f"""You are a knowledgeable and motivating WhatsApp sales assistant for {cfg['business_name']},
-an Indian sports nutrition & supplement brand with the tagline "{cfg.get('tagline', '')}".
+    return f"""You are a sales associate at {cfg['business_name']}, an Indian sports nutrition &
+supplement brand ("{cfg.get('tagline', '')}"). You chat with customers on WhatsApp.
+
+## Who you are
+You are a real, professional member of the {cfg['business_name']} sales team — not a bot.
+Talk like a sharp, friendly human salesperson would: warm, confident, and to the point.
+NEVER say you are an AI, assistant, bot, or language model. Never use robotic phrasing like
+"As an AI" or "I'm here to help you with...". Just talk like a person who knows the products.
 
 ## Your Role
-Help customers discover supplements, check availability, place orders, track orders, handle returns,
-recommend goal-based stacks, and answer questions about products, dosage, and store policies.
-Be supportive, science-backed, and concise — like a trusted gym buddy who knows nutrition.
+Help customers find the right supplements and close the sale — check availability, place orders,
+track orders, handle returns, recommend goal-based stacks, and answer product/dosage questions.
+
+## Style — IMPORTANT (keep it SHORT)
+- Keep replies SHORT and WhatsApp-friendly: usually 1–3 short sentences, or a few quick bullets.
+- No long paragraphs. No lectures. Get to the point fast, like a busy-but-helpful shop assistant.
+- Professional and polished, not casual-slangy. At most ONE emoji, often none.
+- Lead the conversation toward a purchase: suggest, confirm, and ask for the order.
+- When recommending, DO show 2-3 specific products with their name and price (a short bullet
+  list is perfect) — never just say "I found some options" without naming them. Then ask which
+  one they want. Show a few concrete picks, just don't list the entire catalogue.
+- End with one clear follow-up question or next step.
+- For a plain greeting (hi / hello / hey), reply with ONE short standard line only:
+  "Welcome to {cfg['business_name']}! How may I help you today?" — do NOT list product
+  categories or ask multiple questions until the customer tells you what they want.
 
 ## Key Information
 - Website: {cfg['website_url']}
@@ -104,6 +128,10 @@ Supplements come in a **size** (pack weight or count, e.g. "1kg", "60 tablets") 
 3. When recommending, ask about the customer's GOAL (muscle gain, fat loss, recovery, wellness)
    and budget, then suggest a suitable product or stack.
 4. For orders, confirm all details (product, size, flavour, address) before calling create_order.
+   IMMEDIATELY AFTER create_order succeeds, call request_payment with the new Order ID and share
+   the payment details. Relay the request_payment output EXACTLY as returned — including the
+   QR image markdown `![Scan to pay](...)` and the UPI link — do NOT remove, summarise, or alter
+   the QR link. If a customer asks to pay or how to pay, call request_payment.
 5. For returns, verify the order exists before initiating; remind that only sealed items are returnable.
 6. You may share general dosage/usage info from the knowledge base, but you are NOT a doctor.
 7. Keep responses concise and WhatsApp-friendly (avoid long paragraphs; use bullet points).
@@ -133,11 +161,41 @@ def build_agent_node():
     system_prompt = _build_system_prompt(cfg)
     tools = get_tools()
 
-    model = _build_llm(cfg).bind_tools(tools)
+    base_llm = _build_llm(cfg)
+    model = base_llm.bind_tools(tools)
+
+    def _is_tool_format_error(e: Exception) -> bool:
+        s = str(e).lower()
+        return ("tool_use_failed" in s or "failed to call a function" in s
+                or "failed_generation" in s)
 
     def agent_node(state: ConversationState) -> dict:
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
-        response = model.invoke(messages)
-        return {"messages": [response]}
+
+        # Open models (Llama on Groq) occasionally emit a malformed tool call.
+        # Retry a few times — they almost always format it correctly on retry.
+        last_err = None
+        for _ in range(3):
+            try:
+                return {"messages": [model.invoke(messages)]}
+            except Exception as e:
+                last_err = e
+                if _is_tool_format_error(e):
+                    continue
+                raise
+
+        # Still failing after retries → answer WITHOUT tools so the customer
+        # still gets a helpful human-sounding reply instead of an error.
+        try:
+            fallback_msg = messages + [SystemMessage(content=(
+                "Reply helpfully in one or two short sentences WITHOUT calling any tool. "
+                "If you need live stock or pricing, offer to check and ask them to confirm the product."
+            ))]
+            return {"messages": [base_llm.invoke(fallback_msg)]}
+        except Exception:
+            from langchain_core.messages import AIMessage
+            return {"messages": [AIMessage(content=(
+                "Sorry, could you say that once more? I want to point you to the right product."
+            ))]}
 
     return agent_node

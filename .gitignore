@@ -27,8 +27,14 @@ gradio_cached_examples/
 
 # ── Local dev helpers (not part of the app) ───────────────────
 _watch_hf.py
+_hf_logs.py
+_fix_hf.py
+_groq_models.py
+_verify_groq.py
 _test_*.py
 install_log.txt
+api_out.log
+api_err.log
 
 # ──────────────────────────────────────────────────────────────
 # Standard Python .gitignore (GitHub template)

@@ -565,6 +565,55 @@ def escalate_to_human(customer_phone: str, issue: str) -> str:
     )
 
 
+# ── 10. Request Payment (UPI QR + link) ───────────────────────────────────────
+
+_CFG = None
+
+
+def _load_cfg() -> dict:
+    global _CFG
+    if _CFG is None:
+        try:
+            import yaml
+            p = Path(__file__).parent.parent / "config.yaml"
+            _CFG = yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else {}
+        except Exception:
+            _CFG = {}
+    return _CFG
+
+
+@tool
+def request_payment(order_id: str) -> str:
+    """
+    Generate a UPI payment QR + link for an existing order so the customer can pay.
+    Use this right AFTER placing an order, or whenever the customer asks how to pay.
+
+    Args:
+        order_id: The Order ID (e.g. SN1A2B3C4D)
+    """
+    conn = get_connection()
+    order = row_to_dict(conn.execute(
+        "SELECT id, total_amount FROM orders WHERE id=?", (order_id.upper(),)
+    ).fetchone())
+    conn.close()
+    if not order:
+        return f"Order '{order_id}' not found. Please place the order first, then I can share payment."
+
+    amount = order["total_amount"]
+    cfg = _load_cfg()
+    upi = cfg.get("upi_id", "spicenutrition@upi")
+    website = cfg.get("website_url", "")
+    qr_url = f"/api/payment/qr?order={order['id']}"
+    return (
+        f"💳 **Payment for Order {order['id']}** — Amount: **₹{amount:.0f}**\n"
+        f"Scan this QR with any UPI app (GPay / PhonePe / Paytm):\n"
+        f"![Scan to pay]({qr_url})\n"
+        f"…or pay directly to UPI ID: **{upi}**"
+        + (f"\nPrefer online? Pay at {website}" if website else "")
+        + f"\nAfter paying, just reply with the UPI reference number and we'll confirm your order. 🙏"
+    )
+
+
 # ── 9. Get Website Link ───────────────────────────────────────────────────────
 
 @tool
@@ -593,4 +642,5 @@ def get_tools() -> list:
         get_store_info,
         escalate_to_human,
         get_website_link,
+        request_payment,
     ]

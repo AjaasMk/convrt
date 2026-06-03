@@ -125,21 +125,33 @@ def _build_customer_view(session_id: str) -> list:
     return view
 
 
-def send_message(user_message: str, history: list, session_id: str, customer_phone: str):
-    if not user_message.strip():
-        return _build_customer_view(session_id), session_id, ""
+def send_message(user_message: str, image_path, history: list, session_id: str, customer_phone: str):
+    user_message = (user_message or "").strip()
+    if not user_message and not image_path:
+        return _build_customer_view(session_id), session_id, "", None
 
     if not session_id:
         session_id = str(uuid.uuid4())
 
     phone = customer_phone.strip() or "unknown"
 
+    image_bytes, mime = None, "image/jpeg"
+    if image_path:
+        try:
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+            from agent.vision import guess_mime
+            mime = guess_mime(image_path)
+        except Exception:
+            image_bytes = None
+
     try:
-        chat(user_message.strip(), session_id, phone)  # logs msg + AI reply (if in AI mode)
+        chat(user_message, session_id, phone, image_bytes=image_bytes, image_mime=mime)
     except Exception as e:
         handoff.log_message(session_id, "ai", f"⚠️ Agent error: {e}")
 
-    return _build_customer_view(session_id), session_id, ""
+    # clear text box (return "") and image upload (return None)
+    return _build_customer_view(session_id), session_id, "", None
 
 
 def poll_customer(session_id: str):
@@ -171,21 +183,21 @@ def refresh_conversations():
     return gr.update(choices=choices), banner
 
 
-def _build_staff_view(session_id: str) -> list:
-    view = []
+def _build_staff_view(session_id: str) -> str:
+    lines = []
     for m in handoff.get_messages(session_id):
         if m["role"] == "customer":
-            view.append({"role": "user", "content": m["content"]})
+            lines.append(f"**🧑 Customer:** {m['content']}")
         elif m["role"] == "ai":
-            view.append({"role": "assistant", "content": "🤖 " + m["content"]})
+            lines.append(f"**🤖 AI:** {m['content']}")
         elif m["role"] == "staff":
-            view.append({"role": "assistant", "content": "👤 **You:** " + m["content"]})
-    return view
+            lines.append(f"**👤 You:** {m['content']}")
+    return "\n\n".join(lines) if lines else "_No messages in this conversation yet._"
 
 
 def load_conversation(session_id: str):
     if not session_id:
-        return [], "_Select a conversation._"
+        return "", "_Select a conversation._"
     handoff.maybe_auto_resume(session_id)
     mode = handoff.get_mode(session_id)
     label = "🧑 HUMAN mode — AI paused" if mode == "human" else "🤖 AI mode — agent is replying"
@@ -214,6 +226,18 @@ def staff_resume_ai(session_id: str):
 
 # ── Tab 2: Staff Dashboard ────────────────────────────────────────────────────
 
+def _md_table(headers: list, rows: list) -> str:
+    """Render rows as a Markdown table (lightweight — avoids gr.Dataframe freezes)."""
+    if not rows:
+        return "_No records._"
+    def cell(x):
+        return str(x).replace("|", "\\|").replace("\n", " ")
+    head = "| " + " | ".join(cell(h) for h in headers) + " |"
+    sep = "| " + " | ".join("---" for _ in headers) + " |"
+    body = "\n".join("| " + " | ".join(cell(c) for c in row) + " |" for row in rows)
+    return f"{head}\n{sep}\n{body}"
+
+
 def refresh_dashboard():
     s = _get_stats()
     stats_md = f"""
@@ -230,8 +254,10 @@ def refresh_dashboard():
 
 *Last refreshed: {datetime.now().strftime('%H:%M:%S')}*
 """
-    orders = _get_recent_orders()
-    escalations = _get_escalations()
+    orders = _md_table(
+        ["Order ID", "Customer", "Phone", "Status", "Amount", "Date"], _get_recent_orders())
+    escalations = _md_table(
+        ["ID", "Phone", "Issue", "Status", "Date"], _get_escalations())
     return stats_md, orders, escalations
 
 
@@ -267,7 +293,11 @@ def update_order_status_fn(order_id: str, new_status: str):
 # ── Tab 3: Inventory Manager ──────────────────────────────────────────────────
 
 def refresh_inventory():
-    return _get_inventory(), _get_low_stock()
+    inv = _md_table(
+        ["ID", "Product", "Category", "Size", "Flavour", "Price", "Stock"], _get_inventory())
+    low = _md_table(
+        ["ID", "Product", "Size", "Flavour", "Stock"], _get_low_stock())
+    return inv, low
 
 
 def update_stock_fn(variant_id_str: str, new_stock_str: str):
@@ -336,8 +366,6 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
                 render_markdown=True,
                 placeholder="Start chatting with SpiceNutrition AI...",
             )
-            # Live poll so staff replies (human takeover) appear for the customer.
-            customer_timer = gr.Timer(3.0)
 
             with gr.Row():
                 msg_input = gr.Textbox(
@@ -348,6 +376,12 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
                 )
                 send_btn = gr.Button("Send ➤", variant="primary", scale=1)
                 clear_btn = gr.Button("🗑 Clear", scale=1)
+
+            image_input = gr.Image(
+                label="📷 Saw a product in a reel? Upload a screenshot and I'll identify it",
+                type="filepath",
+                height=160,
+            )
 
             gr.Examples(
                 examples=[
@@ -367,16 +401,18 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
             # Wire up
             send_btn.click(
                 send_message,
-                inputs=[msg_input, chatbot, session_id_state, customer_phone_input],
-                outputs=[chatbot, session_id_state, msg_input],
+                inputs=[msg_input, image_input, chatbot, session_id_state, customer_phone_input],
+                outputs=[chatbot, session_id_state, msg_input, image_input],
             )
             msg_input.submit(
                 send_message,
-                inputs=[msg_input, chatbot, session_id_state, customer_phone_input],
-                outputs=[chatbot, session_id_state, msg_input],
+                inputs=[msg_input, image_input, chatbot, session_id_state, customer_phone_input],
+                outputs=[chatbot, session_id_state, msg_input, image_input],
             )
             clear_btn.click(clear_chat, outputs=[chatbot, session_id_state, msg_input])
-            customer_timer.tick(poll_customer, inputs=session_id_state, outputs=chatbot)
+            # Manual "refresh" to pull in staff replies during a human takeover
+            refresh_chat_btn = gr.Button("🔄 Check for replies", size="sm")
+            refresh_chat_btn.click(poll_customer, inputs=session_id_state, outputs=chatbot)
 
         # ── Tab 2: Staff Dashboard ────────────────────────────────────────────
         with gr.TabItem("📊 Staff Dashboard"):
@@ -388,12 +424,7 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
             stats_display = gr.Markdown()
 
             gr.Markdown("### 🛒 Recent Orders")
-            orders_table = gr.Dataframe(
-                headers=["Order ID", "Customer", "Phone", "Status", "Amount", "Date"],
-                datatype=["str", "str", "str", "str", "str", "str"],
-                interactive=False,
-                wrap=True,
-            )
+            orders_table = gr.Markdown()
 
             with gr.Row():
                 order_id_input  = gr.Textbox(label="Order ID", placeholder="SH1A2B3C4D")
@@ -406,12 +437,7 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
             order_update_msg = gr.Markdown()
 
             gr.Markdown("### 🚨 Escalations")
-            escalations_table = gr.Dataframe(
-                headers=["ID", "Phone", "Issue", "Status", "Date"],
-                datatype=["number", "str", "str", "str", "str"],
-                interactive=False,
-                wrap=True,
-            )
+            escalations_table = gr.Markdown()
 
             with gr.Row():
                 escalation_id_input = gr.Textbox(label="Escalation ID to Resolve", placeholder="1")
@@ -447,11 +473,7 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
                 )
                 refresh_conv_btn = gr.Button("🔄 Refresh", scale=1)
             conv_status = gr.Markdown("_Select a conversation._")
-            staff_chat = gr.Chatbot(
-                label="Conversation transcript",
-                height=320,
-                render_markdown=True,
-            )
+            staff_chat = gr.Markdown(label="Conversation transcript")
             with gr.Row():
                 staff_reply_box = gr.Textbox(
                     label="",
@@ -461,7 +483,6 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
                 )
                 staff_send_btn = gr.Button("Send as staff ➤", variant="primary", scale=1)
                 resume_ai_btn = gr.Button("🤖 Resume AI", scale=1)
-            conv_timer = gr.Timer(3.0)
 
             # Wire up handoff panel
             refresh_conv_btn.click(refresh_conversations, outputs=[conv_dropdown, handoff_banner])
@@ -479,9 +500,8 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
                 outputs=[staff_chat, staff_reply_box, conv_status],
             )
             resume_ai_btn.click(staff_resume_ai, inputs=conv_dropdown, outputs=[staff_chat, conv_status])
-            # Live refresh of the conversation list + open transcript
-            conv_timer.tick(refresh_conversations, outputs=[conv_dropdown, handoff_banner])
-            conv_timer.tick(load_conversation, inputs=conv_dropdown, outputs=[staff_chat, conv_status])
+            # Refresh the transcript after sending / taking over (no auto-timer)
+            staff_send_btn.click(load_conversation, inputs=conv_dropdown, outputs=[staff_chat, conv_status])
 
             demo.load(refresh_dashboard, outputs=[stats_display, orders_table, escalations_table])
             demo.load(refresh_conversations, outputs=[conv_dropdown, handoff_banner])
@@ -494,20 +514,10 @@ with gr.Blocks(title="Convrt – SpiceNutrition AI Agent") as demo:
                 refresh_inv_btn = gr.Button("🔄 Refresh Inventory", variant="primary")
 
             gr.Markdown("### All Products & Variants")
-            inventory_table = gr.Dataframe(
-                headers=["Variant ID", "Product", "Category", "Size", "Flavour", "Price", "Stock"],
-                datatype=["number", "str", "str", "str", "str", "str", "number"],
-                interactive=False,
-                wrap=True,
-            )
+            inventory_table = gr.Markdown()
 
             gr.Markdown("### ⚠️ Low Stock Alerts (≤ 5 units)")
-            low_stock_table = gr.Dataframe(
-                headers=["Variant ID", "Product", "Size", "Flavour", "Stock"],
-                datatype=["number", "str", "str", "str", "number"],
-                interactive=False,
-                wrap=True,
-            )
+            low_stock_table = gr.Markdown()
 
             gr.Markdown("### Update Stock")
             with gr.Row():

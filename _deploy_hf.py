@@ -23,16 +23,17 @@ print("Authenticated as:", who.get("name"))
 api.create_repo(
     repo_id=REPO_ID,
     repo_type="space",
-    space_sdk="gradio",
-    private=True,
+    space_sdk="docker",
+    private=False,
     exist_ok=True,
 )
-print(f"Space ready: {REPO_ID} (private)")
+print(f"Space ready: {REPO_ID}")
 
 # 2) Set Secrets (so the app runs without .env)
 secrets = {
-    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
-    "GEMINI_MODEL": os.getenv("GEMINI_MODEL", "gemini-flash-latest"),
+    "LLM_PROVIDER": os.getenv("LLM_PROVIDER", "groq"),
+    "GROQ_API_KEY": os.getenv("GROQ_API_KEY"),
+    "GROQ_MODEL": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
     "APP_USERNAME": os.getenv("APP_USERNAME", "spicenutrition"),
     "APP_PASSWORD": os.getenv("APP_PASSWORD", "changeme123"),
 }
@@ -55,6 +56,11 @@ api.upload_folder(
         "*.log",
         ".git/**",
         "_deploy_hf.py",
+        "_watch_hf.py",
+        "_hf_logs.py",
+        "_fix_hf.py",
+        "_groq_models.py",
+        "_verify_groq.py",
         "_test_*.py",
     ],
 )
