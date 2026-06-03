@@ -1,7 +1,6 @@
 # ── Secrets — NEVER commit these ──────────────────────────────
 .env
 .env.*
-!.env.example
 *.key
 *.pem
 secrets.json
@@ -24,6 +23,9 @@ app_stderr.log
 .gradio/
 flagged/
 gradio_cached_examples/
+
+# ── Separate / not part of the Convrt product ─────────────────
+agency/
 
 # ── Local dev helpers (not part of the app) ───────────────────
 _watch_hf.py
